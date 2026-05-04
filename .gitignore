@@ -1,0 +1,31 @@
+# Build output
+build/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# CMake generated
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+*.cmake
+
+# Compiled output
+*.o
+*.obj
+*.elf
+*.bin
+*.hex
+*.map
+*.a
+*.so
+*.dylib
+
+# OS files
+.DS_Store
+Thumbs.db
