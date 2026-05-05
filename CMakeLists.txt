@@ -7,8 +7,9 @@ find_package(hpm-sdk REQUIRED HINTS $ENV{HPM_SDK_BASE})
 
 project(demo)
 
-sdk_inc(.)
+sdk_inc(./include)
 
-
+sdk_app_src(src/can/can.c)
+sdk_app_src(src/motor/RSMotorBase.c)
 sdk_app_src(src/mcan_echo.c)
 generate_ide_projects()

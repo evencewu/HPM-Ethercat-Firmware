@@ -33,7 +33,7 @@ openocd -s $HPM_SDK_BASE/boards/openocd \
     -f $HPM_SDK_BASE/boards/openocd/probes/ft2232.cfg \
     -f $HPM_SDK_BASE/boards/openocd/soc/hpm5e00.cfg \
     -f $HPM_SDK_BASE/boards/openocd/boards/hpm5e00evk.cfg \
-    -c "init; program build/output/demo.elf verify reset exit"
+    -c "program build/output/demo.elf verify reset exit"
 ```
 
 * 两个终端
