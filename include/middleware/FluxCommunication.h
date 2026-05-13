@@ -1,0 +1,6 @@
+#ifndef _FLUX_COMMUNICATION_H_
+#define _FLUX_COMMUNICATION_H_
+
+
+
+#endif
