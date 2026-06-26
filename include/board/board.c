@@ -74,7 +74,7 @@
  *      0 - 4MB / 1 - 8MB / 2 - 16MB
  */
 #if defined(FLASH_XIP) && FLASH_XIP
-__attribute__((section(".nor_cfg_option"), used)) const uint32_t option[4] = { 0xfcf90002, 0x00000005, 0x1000, 0x0 };
+__attribute__((section(".nor_cfg_option"), used)) const uint32_t option[4] = { BOARD_APP_XPI_NOR_CFG_OPT_HDR, BOARD_APP_XPI_NOR_CFG_OPT_OPT0, BOARD_APP_XPI_NOR_CFG_OPT_OPT1, 0x0 };
 #endif
 
 #if defined(FLASH_UF2) && FLASH_UF2
@@ -714,6 +714,40 @@ void board_init_ethercat(ESC_Type *ptr)
 #if BOARD_ECAT_SUPPORT_PORT2
     gpio_set_pin_output_with_initial(HPM_GPIO0, BOARD_ECAT_PHY2_RESET_GPIO_PORT_INDEX, BOARD_ECAT_PHY2_RESET_PIN_INDEX, 0);
 #endif
+
+    /* Configure ESC for EEPROM emulation (no physical EEPROM on EVK) */
+    esc_eeprom_clock_config_t esc_config;
+    esc_config.eeprom_emulation = true;
+    esc_config.eeprom_size_over_16kbit = false;
+    esc_config.core_clock_en = true;
+    esc_config.phy_refclk_en = true;
+    esc_config_eeprom_and_clock(HPM_ESC, &esc_config);
+
+    /* Configure NMII_LINK signals from IO pins */
+    esc_config_nmii_link_source(HPM_ESC, true, BOARD_ECAT_SUPPORT_PORT1, BOARD_ECAT_SUPPORT_PORT2);
+
+    /* Map CTRL signals to NMII_LINK functions */
+    esc_config_ctrl_signal_function(HPM_ESC, BOARD_ECAT_NMII_LINK0_CTRL_INDEX, esc_ctrl_signal_func_alt_nmii_link0, BOARD_ECAT_PORT0_LINK_INVERT);
+#if BOARD_ECAT_SUPPORT_PORT1
+    esc_config_ctrl_signal_function(HPM_ESC, BOARD_ECAT_NMII_LINK1_CTRL_INDEX, esc_ctrl_signal_func_alt_nmii_link1, BOARD_ECAT_PORT1_LINK_INVERT);
+#endif
+#if BOARD_ECAT_SUPPORT_PORT2
+    esc_config_ctrl_signal_function(HPM_ESC, BOARD_ECAT_NMII_LINK2_CTRL_INDEX, esc_ctrl_signal_func_alt_nmii_link2, BOARD_ECAT_PORT2_LINK_INVERT);
+#endif
+
+    /* Set PHY MDIO address offset */
+    esc_set_phy_offset(HPM_ESC, BOARD_ECAT_PHY_ADDR_OFFSET);
+
+    /* Release PHY reset after a short delay */
+    board_delay_ms(10);
+    gpio_write_pin(HPM_GPIO0, BOARD_ECAT_PHY0_RESET_GPIO_PORT_INDEX, BOARD_ECAT_PHY0_RESET_PIN_INDEX, 1);
+#if BOARD_ECAT_SUPPORT_PORT1
+    gpio_write_pin(HPM_GPIO0, BOARD_ECAT_PHY1_RESET_GPIO_PORT_INDEX, BOARD_ECAT_PHY1_RESET_PIN_INDEX, 1);
+#endif
+#if BOARD_ECAT_SUPPORT_PORT2
+    gpio_write_pin(HPM_GPIO0, BOARD_ECAT_PHY2_RESET_GPIO_PORT_INDEX, BOARD_ECAT_PHY2_RESET_PIN_INDEX, 1);
+#endif
+    board_delay_ms(10);
 }
 
 /* switch and led pin for ethercat io test */
