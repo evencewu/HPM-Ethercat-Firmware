@@ -25,6 +25,7 @@ sdk_app_src(${SOES_DIR}/soes/esc_eep.c)
 # HPM5E00 HAL for SOES (local copy)
 sdk_app_src(src/esc_hal/esc_hw.c)
 sdk_app_src(src/esc_hal/esc_hw_eep.c)
+sdk_app_src(src/esc_hal/sii_eeprom_data.c)
 
 # Application sources
 sdk_app_src(src/esc_soes/main.c)

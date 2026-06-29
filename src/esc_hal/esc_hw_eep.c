@@ -10,7 +10,7 @@
 
 #include <string.h>
 
-#include "sii_eeprom_data.c"
+#include "sii_eeprom_data.h"
 
 static uint8_t eep_buf[EEP_EMU_SIZE];
 
@@ -19,7 +19,7 @@ static uint8_t eep_buf[EEP_EMU_SIZE];
  */
 void EEP_init(void)
 {
-   memcpy(eep_buf, sii_eeprom_data, EEP_EMU_SIZE);
+   sii_eeprom_build(eep_buf, EEP_EMU_SIZE);
 }
 
 /** EEPROM emulation periodic task.

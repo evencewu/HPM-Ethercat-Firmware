@@ -9,6 +9,7 @@
 #include "hpm_esc_drv.h"
 #include "hpm_gpio_drv.h"
 #include "esc_eep.h"
+#include "sii_eeprom_data.h"
 
 /* -------------------------------------------------------------------------- */
 /* JL1111 PHY constants — copied from SDK's hpm_ecat_phy.h                   */
@@ -105,20 +106,6 @@ static hpm_stat_t ecat_phy_config(ESC_Type *ptr)
 #endif
 
     return status_success;
-}
-
-/* CRC-8 for SII config checksum, poly 0x07, init 0xFF */
-static uint8_t sii_crc8(const uint8_t *data, size_t len)
-{
-    uint8_t rem = 0xFF;
-    for (size_t i = 0; i < len; i++) {
-        rem ^= data[i];
-        for (int b = 0; b < 8; b++) {
-            if (rem & 0x80) rem = ((rem << 1) ^ 0x07) & 0xFF;
-            else            rem = (rem << 1) & 0xFF;
-        }
-    }
-    return rem;
 }
 
 /** Handle initial EEPROM reload request before SOES takes over.

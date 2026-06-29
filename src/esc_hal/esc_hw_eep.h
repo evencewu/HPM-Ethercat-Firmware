@@ -8,8 +8,7 @@
 
 #include <stdint.h>
 
-/* SII EEPROM size in bytes */
-#define EEP_EMU_SIZE   2048
+/* SII EEPROM size now defined in sii_eeprom_data.h */
 
 /* periodic task */
 void EEP_hw_process(void);
