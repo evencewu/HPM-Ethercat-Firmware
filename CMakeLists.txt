@@ -11,9 +11,9 @@ set(SOES_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../dependence/SOES")
 
 sdk_inc(./include)
 sdk_inc(./src/esc_soes)
+sdk_inc(./src/esc_hal)
 sdk_inc(${SOES_DIR}/soes)
 sdk_inc(${SOES_DIR}/soes/include/sys/gcc)
-sdk_inc(${SOES_DIR}/soes/hal/hpm5e00)
 
 # SOES core sources
 sdk_app_src(${SOES_DIR}/soes/esc.c)
@@ -22,9 +22,9 @@ sdk_app_src(${SOES_DIR}/soes/esc_coe.c)
 sdk_app_src(${SOES_DIR}/soes/esc_foe.c)
 sdk_app_src(${SOES_DIR}/soes/esc_eep.c)
 
-# HPM5E00 HAL for SOES
-sdk_app_src(${SOES_DIR}/soes/hal/hpm5e00/esc_hw.c)
-sdk_app_src(${SOES_DIR}/soes/hal/hpm5e00/esc_hw_eep.c)
+# HPM5E00 HAL for SOES (local copy)
+sdk_app_src(src/esc_hal/esc_hw.c)
+sdk_app_src(src/esc_hal/esc_hw_eep.c)
 
 # Application sources
 sdk_app_src(src/esc_soes/main.c)
