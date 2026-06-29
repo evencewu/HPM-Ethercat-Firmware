@@ -13,6 +13,67 @@
 #include <stdio.h>
 #include <string.h>
 
+/* Minimal RAM-safe UART TX using direct register writes.
+ * ATTR_RAMFUNC places these in ILM so they survive flash erase.
+ * We CANNOT call SDK UART functions (uart_send_byte, etc.) here
+ * because they live in flash and get erased before we program. */
+
+/* Place a string literal in the .fast section (ILM) so it survives
+ * flash erase.  The linker script's *(.fast.*) rule catches these. */
+#define RAM_STR(msg) ({ \
+    static const char _s[] __attribute__((section(".fast.rodata"), used)) = msg; \
+    _s; \
+})
+
+/* RAM-safe memcpy / memset — we CANNOT use the standard library versions
+ * after erasing flash because they reside in the erased region. */
+
+static void ATTR_RAMFUNC ram_memcpy(void *dst, const void *src, size_t n)
+{
+    uint8_t *d = (uint8_t *)dst;
+    const uint8_t *s = (const uint8_t *)src;
+    while (n--) {
+        *d++ = *s++;
+    }
+}
+
+static void ATTR_RAMFUNC ram_memset(void *dst, uint8_t val, size_t n)
+{
+    uint8_t *d = (uint8_t *)dst;
+    while (n--) {
+        *d++ = val;
+    }
+}
+
+static void ATTR_RAMFUNC ram_putc(char c)
+{
+    /* HPM_UART0 base = 0xF0040000 (console UART), LSR at +0x34, THR at +0x20.
+     * Hardcoded to eliminate any struct/pointer dependency.
+     * MUST use UART0 — that's where the debug serial is connected. */
+    volatile uint32_t *uart_lsr = (volatile uint32_t *)0xF0040034UL;
+    volatile uint32_t *uart_thr = (volatile uint32_t *)0xF0040020UL;
+    while ((*uart_lsr & 0x20U) == 0) {
+    }
+    *uart_thr = (uint8_t)c;
+}
+
+/* Minimal puts using stack-based string (no flash .rodata access!) */
+static void ATTR_RAMFUNC ram_puts(const char *s)
+{
+    while (*s) {
+        ram_putc(*s++);
+    }
+}
+
+/* Put hex without static const array (would be in flash .rodata) */
+static void ATTR_RAMFUNC ram_puthex(uint32_t v)
+{
+    for (int i = 28; i >= 0; i -= 4) {
+        uint8_t nib = (uint8_t)((v >> i) & 0xFU);
+        ram_putc((char)(nib < 10U ? '0' + nib : 'A' + nib - 10U));
+    }
+}
+
 #define BOOT_IDLE        0
 #define BOOT_START       1
 #define BOOT_UPDATING    2
@@ -20,6 +81,8 @@
 #define BOOT_RESET       4
 #define BOOT_FAILED      99
 
+/* NOR flash device offsets (for ROM API erase/program destination).
+ * These are offsets within the NOR flash chip, NOT CPU addresses. */
 #define FOE_FLASH_STAGING_ADDR  0x84000UL
 #define FOE_FLASH_MAX_SIZE      (256U * 1024U)
 #define FOE_FLASH_SECTOR_SIZE   4096U
@@ -27,6 +90,11 @@
 #define FOE_APP_BASE_ADDR       0x00000000UL
 #define FOE_IMAGE_OFFSET        0x400UL     /* .bin starts at nor_cfg_option (FLASH + 0x400) */
 #define FOE_METADATA_ADDR       0x83000UL
+
+/* XIP-mapped CPU addresses for direct flash reads.
+ * BOARD_FLASH_BASE_ADDRESS is defined in board.h (0x80000000UL for HPM5E00). */
+#define FLASH_XIP_STAGING       (BOARD_FLASH_BASE_ADDRESS + FOE_FLASH_STAGING_ADDR)
+#define FLASH_XIP_METADATA      (BOARD_FLASH_BASE_ADDRESS + FOE_METADATA_ADDR)
 
 #define FOE_METADATA_MAGIC      0x464F4501UL
 
@@ -142,7 +210,9 @@ static uint32_t flash_foe_buffer(foe_file_cfg_t *self, uint8_t *data, size_t len
             /* Load existing sector content if not writing a full sector. */
             sector_addr = sec_addr;
             if (sec_off != 0 || chunk != FOE_FLASH_SECTOR_SIZE) {
-                memcpy(sector_buffer, (void *)sector_addr, FOE_FLASH_SECTOR_SIZE);
+                /* sector_addr is a NOR offset; add XIP base for CPU read */
+                memcpy(sector_buffer, (void *)(BOARD_FLASH_BASE_ADDRESS + sector_addr),
+                       FOE_FLASH_SECTOR_SIZE);
             } else {
                 memset(sector_buffer, 0xFF, FOE_FLASH_SECTOR_SIZE);
             }
@@ -184,7 +254,7 @@ static uint32_t calculate_staged_crc32(uint32_t size)
         if (chunk > FOE_FLASH_SECTOR_SIZE) {
             chunk = FOE_FLASH_SECTOR_SIZE;
         }
-        memcpy(sector_buffer, (void *)(FOE_FLASH_STAGING_ADDR + offset), chunk);
+        memcpy(sector_buffer, (void *)(FLASH_XIP_STAGING + offset), chunk);
         crc = crc32_update(crc, sector_buffer, chunk);
         offset += chunk;
     }
@@ -230,12 +300,20 @@ ATTR_RAMFUNC static void copy_firmware_and_reset(void)
     foe_metadata_t metadata;
     int status;
 
+    /* DEBUG: prove we entered this function */
+    ram_putc('A');
+    for (volatile uint32_t _d = 0; _d < 100000U; _d++) {
+    }
+
     /* Disable interrupts; we are about to overwrite the running application. */
     disable_global_irq(CSR_MSTATUS_MIE_MASK);
 
-    /* Read and verify metadata. */
-    memcpy(&metadata, (void *)FOE_METADATA_ADDR, sizeof(metadata));
+    /* Read and verify metadata (pre-erase — safe to use memcpy). */
+    memcpy(&metadata, (void *)FLASH_XIP_METADATA, sizeof(metadata));
+    ram_puts(RAM_STR("BOOT: meta sz=")); ram_puthex(metadata.size);
+    ram_puts(RAM_STR(" crc=")); ram_puthex(metadata.crc32); ram_putc('\n');
     if (metadata.magic != FOE_METADATA_MAGIC) {
+        ram_puts(RAM_STR("BOOT: bad meta magic\n"));
         goto do_reset;
     }
 
@@ -245,16 +323,13 @@ ATTR_RAMFUNC static void copy_firmware_and_reset(void)
     }
 
     /* Sanity check the staged image header.
-     * 0xFFFFFFFF = erased flash (no valid firmware staged).
-     * 0x00000000 is a valid RISC-V instruction (c.unimp/nop depending
-     * on ISA extension), so skip that check — the CRC32 guard above
-     * already detects corrupted or blank images. */
-    uint32_t first_word = *((volatile uint32_t *)FOE_FLASH_STAGING_ADDR);
+     * 0xFFFFFFFF = erased flash (no valid firmware staged). */
+    uint32_t first_word = *((volatile uint32_t *)FLASH_XIP_STAGING);
     if (first_word == 0xFFFFFFFFUL) {
         goto do_reset;
     }
 
-    /* Verify CRC32 of staged firmware. */
+    /* Verify CRC32 of staged firmware (pre-erase — uses standard memcpy). */
     expected_crc = metadata.crc32;
     actual_crc = 0xFFFFFFFFUL;
     {
@@ -264,7 +339,7 @@ ATTR_RAMFUNC static void copy_firmware_and_reset(void)
             if (chunk > FOE_FLASH_SECTOR_SIZE) {
                 chunk = FOE_FLASH_SECTOR_SIZE;
             }
-            memcpy(sector_buffer, (void *)(FOE_FLASH_STAGING_ADDR + offset), chunk);
+            memcpy(sector_buffer, (void *)(FLASH_XIP_STAGING + offset), chunk);
             actual_crc = crc32_update(actual_crc, sector_buffer, chunk);
             offset += chunk;
         }
@@ -272,39 +347,89 @@ ATTR_RAMFUNC static void copy_firmware_and_reset(void)
     actual_crc = ~actual_crc;
 
     if (actual_crc != expected_crc) {
+        ram_puts(RAM_STR("BOOT: CRC mismatch\n"));
         goto do_reset;
     }
 
-    /* Round up to sector size for erase, including the 0x400 offset gap
-     * before the .bin image starts (nor_cfg_option is at flash + 0x400). */
-    erase_size = FOE_IMAGE_OFFSET + ((size + FOE_FLASH_SECTOR_SIZE - 1U) & ~(FOE_FLASH_SECTOR_SIZE - 1U));
+    /* Erase application area, starting at FOE_IMAGE_OFFSET (0x400) so that
+     * nor_cfg_option (0x0–0x400) is preserved.  The boot ROM needs
+     * nor_cfg_option to configure NOR flash after MCU reset. */
+    erase_size = (size + FOE_FLASH_SECTOR_SIZE - 1U) & ~(FOE_FLASH_SECTOR_SIZE - 1U);
 
-    /* Erase application area (from base, covering the offset gap). */
+    ram_puts(RAM_STR("BOOT: erasing app area\n"));
     status = rom_xpi_nor_erase(BOARD_APP_XPI_NOR_XPI_BASE,
                                xpi_xfer_channel_auto,
                                &s_nor_config,
-                               FOE_APP_BASE_ADDR, erase_size);
+                               FOE_APP_BASE_ADDR + FOE_IMAGE_OFFSET, erase_size);
     if (status != 0) {
+        ram_puts(RAM_STR("BOOT: erase failed\n"));
         goto do_reset;
     }
+    ram_puts(RAM_STR("BOOT: erase OK\n"));
 
-    /* Program application area from staging area.
-     * rom_xpi_nor_program() requires 4-byte alignment on size.
-     * Destination is FOE_APP_BASE_ADDR + FOE_IMAGE_OFFSET because the .bin
-     * image starts at nor_cfg_option (flash + 0x400), not at flash base. */
+    /* Program application area sector-by-sector through RAM buffer.
+     *
+     * We CANNOT use standard memcpy after the erase (it's in flash), so
+     * ram_memcpy / ram_memset are used throughout this block.
+     *
+     * Read-back verification is intentionally omitted:
+     *   - rom_xpi_nor_program() return code already confirms success
+     *   - Pre-erase CRC32 verified the staging data
+     *   - XIP reads of just-programmed pages may hit stale cache lines */
+    ram_putc('P');  /* DEBUG: entering programming loop */
     {
-        uint32_t prog_size = (size + 3U) & ~3U;
-        status = rom_xpi_nor_program(BOARD_APP_XPI_NOR_XPI_BASE,
-                                     xpi_xfer_channel_auto,
-                                     &s_nor_config,
-                                     (uint32_t *)FOE_FLASH_STAGING_ADDR,
-                                     FOE_APP_BASE_ADDR + FOE_IMAGE_OFFSET, prog_size);
-    }
-    if (status != 0) {
-        goto do_reset;
+        uint32_t offset = 0;
+        uint32_t sector_count = 0;
+        while (offset < size) {
+            uint32_t chunk = size - offset;
+            if (chunk > FOE_FLASH_SECTOR_SIZE) {
+                chunk = FOE_FLASH_SECTOR_SIZE;
+            }
+
+            /* Read from staging (XIP CPU address) into RAM buffer.
+             * MUST use ram_memcpy — standard memcpy is in erased flash. */
+            ram_memcpy(sector_buffer, (void *)(FLASH_XIP_STAGING + offset), chunk);
+
+            /* Round up to 4-byte alignment for ROM API */
+            uint32_t prog_chunk = (chunk + 3U) & ~3U;
+            if (prog_chunk > chunk) {
+                ram_memset(sector_buffer + chunk, 0xFF, prog_chunk - chunk);
+            }
+
+            /* Program from RAM buffer to application area */
+            status = rom_xpi_nor_program(BOARD_APP_XPI_NOR_XPI_BASE,
+                                         xpi_xfer_channel_auto,
+                                         &s_nor_config,
+                                         (uint32_t *)sector_buffer,
+                                         FOE_APP_BASE_ADDR + FOE_IMAGE_OFFSET + offset,
+                                         prog_chunk);
+            if (status != 0) {
+                ram_puts(RAM_STR("BOOT: prog fail at ")); ram_puthex(FOE_APP_BASE_ADDR + FOE_IMAGE_OFFSET + offset);
+                ram_putc('\n');
+                goto do_reset;
+            }
+
+            /* Per-sector progress dot */
+            ram_putc('.');
+            /* Tiny delay so UART can drain before next sector */
+            for (volatile uint32_t _d = 0; _d < 50000U; _d++) {
+            }
+
+            offset += chunk;
+            sector_count++;
+        }
+        ram_putc('\n');
+        ram_puts(RAM_STR("BOOT: prog OK sectors=")); ram_puthex(sector_count); ram_putc('\n');
     }
 
 do_reset:
+    ram_puts(RAM_STR("BOOT: resetting...\n"));
+    /* Flush UART TX FIFO: wait for TEMT (bit 6) before reset */
+    {
+        volatile uint32_t *uart_lsr = (volatile uint32_t *)0xF0040034UL;
+        while ((*uart_lsr & 0x40U) == 0) {
+        }
+    }
     /* Trigger software reset. This inline write does not return. */
     HPM_PPOR->SOFTWARE_RESET = PPOR_SOFTWARE_RESET_COUNTER_SET(1000);
     while (1) {
@@ -411,6 +536,12 @@ void bootstrap_state(void)
         break;
 
     case BOOT_RESET:
+        /* Test ram_putc BEFORE calling copy_firmware_and_reset */
+        ram_putc('X');
+        ram_putc('Y');
+        /* Small delay so UART has time to transmit */
+        for (volatile uint32_t _d = 0; _d < 100000U; _d++) {
+        }
         printf("BOOT: copying firmware to application area and reset\n");
         copy_firmware_and_reset();
         break;
