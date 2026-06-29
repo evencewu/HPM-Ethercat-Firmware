@@ -10,7 +10,7 @@
 #include "hpm_romapi.h"
 #include "hpm_interrupt.h"
 
-#include <stdio.h>
+#include "middleware/logger.h"
 #include <string.h>
 
 /* Minimal RAM-safe UART TX using direct register writes.
@@ -156,13 +156,13 @@ static int flush_sector(void)
 
     status = flash_erase_range(sector_addr, FOE_FLASH_SECTOR_SIZE);
     if (status != 0) {
-        printf("Flash erase failed at 0x%08lx\n", (uint32_t)sector_addr);
+        LOG_ERROR("FLASH", "erase failed at 0x%08lx", (uint32_t)sector_addr);
         return -1;
     }
 
     status = flash_program(sector_addr, (uint32_t *)sector_buffer, FOE_FLASH_SECTOR_SIZE);
     if (status != 0) {
-        printf("Flash program failed at 0x%08lx\n", (uint32_t)sector_addr);
+        LOG_ERROR("FLASH", "program failed at 0x%08lx", (uint32_t)sector_addr);
         return -1;
     }
 
@@ -182,8 +182,8 @@ static uint32_t flash_foe_buffer(foe_file_cfg_t *self, uint8_t *data, size_t len
 
     /* Reject writes that would overflow the staging area. */
     if (offset + length > FOE_FLASH_MAX_SIZE) {
-        printf("FOE: write would overflow staging area (%lu + %u > %lu)\n",
-               (unsigned long)offset, (unsigned)length, (unsigned long)FOE_FLASH_MAX_SIZE);
+        LOG_WARN("FOE", "write would overflow staging area (%lu + %u > %lu)",
+         (unsigned long)offset, (unsigned)length, (unsigned long)FOE_FLASH_MAX_SIZE);
         return 1;
     }
 
@@ -351,75 +351,85 @@ ATTR_RAMFUNC static void copy_firmware_and_reset(void)
         goto do_reset;
     }
 
-    /* Erase application area, starting at FOE_IMAGE_OFFSET (0x400) so that
-     * nor_cfg_option (0x0–0x400) is preserved.  The boot ROM needs
-     * nor_cfg_option to configure NOR flash after MCU reset. */
-    erase_size = (size + FOE_FLASH_SECTOR_SIZE - 1U) & ~(FOE_FLASH_SECTOR_SIZE - 1U);
+    /* Bulk-erase the entire application area from sector-aligned NOR 0x000.
+     *
+     * Per-sector erase was FATALLY BROKEN: because the .bin starts at
+     * NOR 0x400 (not sector-aligned to 4KB), each sector's erase would
+     * overwrite the last 0x400 bytes of the PREVIOUS sector's program.
+     *
+     * Bulk erase avoids this overlap.  The .bin is then programmed sector
+     * by sector without any further erasing.
+     *
+     * We CANNOT use standard memcpy after the erase (it lives in flash),
+     * so ram_memcpy / ram_memset are used throughout the programming loop. */
+    erase_size = (size + FOE_IMAGE_OFFSET + FOE_FLASH_SECTOR_SIZE - 1U)
+               & ~(FOE_FLASH_SECTOR_SIZE - 1U);
 
     ram_puts(RAM_STR("BOOT: erasing app area\n"));
     status = rom_xpi_nor_erase(BOARD_APP_XPI_NOR_XPI_BASE,
                                xpi_xfer_channel_auto,
                                &s_nor_config,
-                               FOE_APP_BASE_ADDR + FOE_IMAGE_OFFSET, erase_size);
+                               FOE_APP_BASE_ADDR, erase_size);
     if (status != 0) {
         ram_puts(RAM_STR("BOOT: erase failed\n"));
         goto do_reset;
     }
     ram_puts(RAM_STR("BOOT: erase OK\n"));
 
-    /* Program application area sector-by-sector through RAM buffer.
+    /* Program page-by-page (256 bytes = NOR page size).
      *
-     * We CANNOT use standard memcpy after the erase (it's in flash), so
-     * ram_memcpy / ram_memset are used throughout this block.
-     *
-     * Read-back verification is intentionally omitted:
-     *   - rom_xpi_nor_program() return code already confirms success
-     *   - Pre-erase CRC32 verified the staging data
-     *   - XIP reads of just-programmed pages may hit stale cache lines */
-    ram_putc('P');  /* DEBUG: entering programming loop */
+     * After bulk erase, rom_xpi_nor_program with 4096-byte chunks was
+     * unreliable.  256-byte pages match the NOR flash hardware page size
+     * and are guaranteed safe. */
     {
+        #define FOE_PAGE_SIZE  256U
         uint32_t offset = 0;
-        uint32_t sector_count = 0;
+        uint32_t page_count = 0;
+        ram_putc('P');
         while (offset < size) {
             uint32_t chunk = size - offset;
-            if (chunk > FOE_FLASH_SECTOR_SIZE) {
-                chunk = FOE_FLASH_SECTOR_SIZE;
+            if (chunk > FOE_PAGE_SIZE) {
+                chunk = FOE_PAGE_SIZE;
             }
 
-            /* Read from staging (XIP CPU address) into RAM buffer.
-             * MUST use ram_memcpy — standard memcpy is in erased flash. */
+            uint32_t dest = FOE_APP_BASE_ADDR + FOE_IMAGE_OFFSET + offset;
+
+            /* Copy one page from staging to RAM buffer */
             ram_memcpy(sector_buffer, (void *)(FLASH_XIP_STAGING + offset), chunk);
 
-            /* Round up to 4-byte alignment for ROM API */
+            /* Pad to 4-byte alignment */
             uint32_t prog_chunk = (chunk + 3U) & ~3U;
             if (prog_chunk > chunk) {
                 ram_memset(sector_buffer + chunk, 0xFF, prog_chunk - chunk);
             }
 
-            /* Program from RAM buffer to application area */
             status = rom_xpi_nor_program(BOARD_APP_XPI_NOR_XPI_BASE,
                                          xpi_xfer_channel_auto,
                                          &s_nor_config,
                                          (uint32_t *)sector_buffer,
-                                         FOE_APP_BASE_ADDR + FOE_IMAGE_OFFSET + offset,
-                                         prog_chunk);
+                                         dest, prog_chunk);
             if (status != 0) {
-                ram_puts(RAM_STR("BOOT: prog fail at ")); ram_puthex(FOE_APP_BASE_ADDR + FOE_IMAGE_OFFSET + offset);
+                ram_puts(RAM_STR("BOOT: prog fail at ")); ram_puthex(dest);
                 ram_putc('\n');
                 goto do_reset;
             }
 
-            /* Per-sector progress dot */
-            ram_putc('.');
-            /* Tiny delay so UART can drain before next sector */
-            for (volatile uint32_t _d = 0; _d < 50000U; _d++) {
+            /* Progress: hex digit per 16 pages (= 1 sector) */
+            if ((page_count & 0xFU) == 0U) {
+                uint32_t sec = page_count >> 4U;
+                ram_putc((char)(sec < 10U ? '0' + sec : 'A' + sec - 10U));
+            }
+
+            /* Longer delay between pages for flash recovery */
+            for (volatile uint32_t _d = 0; _d < 100000U; _d++) {
             }
 
             offset += chunk;
-            sector_count++;
+            page_count++;
         }
         ram_putc('\n');
-        ram_puts(RAM_STR("BOOT: prog OK sectors=")); ram_puthex(sector_count); ram_putc('\n');
+        ram_puts(RAM_STR("BOOT: prog OK pages=")); ram_puthex(page_count); ram_putc('\n');
+        #undef FOE_PAGE_SIZE
     }
 
 do_reset:
@@ -462,7 +472,7 @@ void bootstrap_foe_init(void)
     sector_addr = 0;
 
     if (flash_init() != 0) {
-        printf("Flash init failed\n");
+        LOG_ERROR("FLASH", "init failed");
         boot_failed = 1;
         return;
     }
@@ -474,7 +484,7 @@ void init_boothook(void)
 {
     boot_state = BOOT_START;
     foe_total_size = 0;
-    printf("Entering BOOT state\n");
+    LOG_INFO("BOOT", "entering BOOT state");
 }
 
 void boot_inithook(void)
@@ -484,7 +494,7 @@ void boot_inithook(void)
     } else {
         boot_state = BOOT_SWAP;
     }
-    printf("Leaving BOOT state\n");
+    LOG_INFO("BOOT", "leaving BOOT state");
 }
 
 void bootstrap_state(void)
@@ -500,7 +510,7 @@ void bootstrap_state(void)
         boot_timeout = 0;
         /* Erase staging area so partial-sector writes don't merge with stale data */
         flash_erase_range(FOE_FLASH_STAGING_ADDR, FOE_FLASH_MAX_SIZE);
-        printf("BOOT: start updating\n");
+        LOG_INFO("BOOT", "start updating");
         break;
 
     case BOOT_UPDATING:
@@ -510,7 +520,7 @@ void bootstrap_state(void)
         board_delay_ms(1);
         boot_timeout++;
         if (boot_timeout > BOOT_TIMEOUT_MAX) {
-            printf("BOOT: timeout waiting for state transition, aborting\n");
+            LOG_ERROR("BOOT", "timeout waiting for state transition, aborting");
             boot_state = BOOT_FAILED;
         }
         break;
@@ -520,13 +530,13 @@ void bootstrap_state(void)
             boot_state = BOOT_FAILED;
             break;
         }
-        printf("BOOT: flash complete, total %lu bytes\n", (unsigned long)foe_total_size);
+        LOG_INFO("BOOT", "flash complete, total %lu bytes", (unsigned long)foe_total_size);
 
         {
             uint32_t crc = calculate_staged_crc32(foe_total_size);
-            printf("BOOT: staged CRC32 = 0x%08lx\n", (unsigned long)crc);
+            LOG_INFO("BOOT", "staged CRC32 = 0x%08lx", (unsigned long)crc);
             if (write_metadata(foe_total_size, crc) != 0) {
-                printf("BOOT: metadata write failed\n");
+                LOG_ERROR("BOOT", "metadata write failed");
                 boot_state = BOOT_FAILED;
                 break;
             }
@@ -542,12 +552,12 @@ void bootstrap_state(void)
         /* Small delay so UART has time to transmit */
         for (volatile uint32_t _d = 0; _d < 100000U; _d++) {
         }
-        printf("BOOT: copying firmware to application area and reset\n");
+        LOG_INFO("BOOT", "copying firmware to application area and reset");
         copy_firmware_and_reset();
         break;
 
     case BOOT_FAILED:
-        printf("BOOT: failed\n");
+        LOG_ERROR("BOOT", "update failed");
         boot_state = BOOT_IDLE;
         break;
 

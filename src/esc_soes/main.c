@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: BSD-3-Clause
  */
 
-#include <stdio.h>
+#include "middleware/logger.h"
 #include "board.h"
 #include "ecat_slv.h"
 #include "esc_hw.h"
@@ -62,21 +62,21 @@ int main(void)
 
     board_init();
     board_init_led_pins();
-    printf("[0] board init done\n"); fflush(stdout);
+    LOG_INFO("MAIN", "board init done");
 
-    printf("[1] SOES FoE demo starting\n"); fflush(stdout);
+    LOG_INFO("MAIN", "SOES FoE demo starting");
 
-    printf("[2] esc_full_init...\n"); fflush(stdout);
+    LOG_INFO("MAIN", "esc_full_init...");
     esc_full_init();
-    printf("[2] esc_full_init done\n"); fflush(stdout);
+    LOG_INFO("MAIN", "esc_full_init done");
 
-    printf("[3] bootstrap_foe_init...\n"); fflush(stdout);
+    LOG_INFO("MAIN", "bootstrap_foe_init...");
     bootstrap_foe_init();
-    printf("[3] bootstrap done\n"); fflush(stdout);
+    LOG_INFO("MAIN", "bootstrap done");
 
-    printf("[4] ecat_slv_init...\n"); fflush(stdout);
+    LOG_INFO("MAIN", "ecat_slv_init...");
     ecat_slv_init(&config);
-    printf("[4] ecat_slv_init done, entering loop\n"); fflush(stdout);
+    LOG_INFO("MAIN", "ecat_slv_init done, entering loop");
 
     uint32_t heartbeat = 0;
     while (1) {

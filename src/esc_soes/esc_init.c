@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: BSD-3-Clause
  */
 
-#include <stdio.h>
+#include "middleware/logger.h"
 #include "board.h"
 #include "hpm_esc_drv.h"
 #include "hpm_gpio_drv.h"
@@ -130,7 +130,7 @@ static void esc_eeprom_handle_reload(void)
     int timeout = 1000; /* ~1 second at 1ms per iteration */
     uint8_t cmd;
 
-    printf("EEPROM: waiting for BUSY...\n"); fflush(stdout);
+    LOG_DEBUG("EEPROM", "waiting for BUSY...");
     /* Wait for ESC to become busy with EEPROM command */
     while (timeout-- > 0) {
         uint16_t ctrl = HPM_ESC->EEPROM_CTRL_STAT;
@@ -141,13 +141,13 @@ static void esc_eeprom_handle_reload(void)
         board_delay_ms(1);
     }
     if (timeout <= 0) {
-        printf("EEPROM: timeout waiting for BUSY\n");
+        LOG_ERROR("EEPROM", "timeout waiting for BUSY");
         return;
     }
-    printf("EEPROM: BUSY detected, ctrl=0x%04X\n", HPM_ESC->EEPROM_CTRL_STAT);
+    LOG_DEBUG("EEPROM", "BUSY detected, ctrl=0x%04X", HPM_ESC->EEPROM_CTRL_STAT);
 
     cmd = ESC_EEPROM_CTRL_STAT_CMD_GET(HPM_ESC->EEPROM_CTRL_STAT);
-    printf("EEPROM: cmd=0x%02X\n", cmd);
+    LOG_DEBUG("EEPROM", "cmd=0x%02X", cmd);
     if (cmd != 0x04) {
         /* Not a reload - ack with error so ESC can proceed */
         esc_eeprom_emulation_ack(HPM_ESC, cmd, true, false);
@@ -164,7 +164,7 @@ static void esc_eeprom_handle_reload(void)
     /* Validate CRC-8 over words 0-6 */
     uint8_t crc_calc = sii_crc8(cfg, 14);
     if (crc_calc != cfg[15]) {
-        printf("EEPROM: CRC fail: calc=0x%02X expected=0x%02X\n", crc_calc, cfg[15]);
+        LOG_ERROR("EEPROM", "CRC fail: calc=0x%02X expected=0x%02X", crc_calc, cfg[15]);
         esc_eeprom_emulation_ack(HPM_ESC, cmd, false, true);
         return;
     }
@@ -181,21 +181,21 @@ static void esc_eeprom_handle_reload(void)
     reload |= (uint32_t)((w0 >> 15) & 1) << 19;   /* ELP2   */
     reload |= 0UL << 20;                           /* ELP3 (unused) */
 
-    printf("EEPROM: reload=0x%08lX\n", (unsigned long)reload);
+    LOG_DEBUG("EEPROM", "reload=0x%08lX", (unsigned long)reload);
     HPM_ESC->EEPROM_DATA = reload;
     esc_eeprom_emulation_ack(HPM_ESC, cmd, false, false);
 
     /* Wait for DLstatus bit 0 to indicate PDI is ready */
-    printf("EEPROM: waiting for DLstatus...\n");
+    LOG_DEBUG("EEPROM", "waiting for DLstatus...");
     timeout = 1000;
     while (timeout-- > 0) {
         if (HPM_ESC->ESC_DL_STAT & 0x0001) break;
         board_delay_ms(1);
     }
     if (timeout > 0) {
-        printf("EEPROM: DLstatus ready\n");
+        LOG_INFO("EEPROM", "DLstatus ready");
     } else {
-        printf("EEPROM: DLstatus timeout, DL_STAT=0x%04X\n", HPM_ESC->ESC_DL_STAT);
+        LOG_ERROR("EEPROM", "DLstatus timeout, DL_STAT=0x%04X", HPM_ESC->ESC_DL_STAT);
     }
 }
 
@@ -212,17 +212,17 @@ static void esc_eeprom_handle_reload(void)
  */
 void esc_full_init(void)
 {
-    printf("ESC: board_init_ethercat...\n"); fflush(stdout);
+    LOG_DEBUG("ESC", "board_init_ethercat...");
     board_init_ethercat(HPM_ESC);
 
-    printf("ESC: EEP_init...\n"); fflush(stdout);
+    LOG_DEBUG("ESC", "EEP_init...");
     EEP_init();
 
-    printf("ESC: eeprom_handle_reload...\n"); fflush(stdout);
+    LOG_DEBUG("ESC", "eeprom_handle_reload...");
     esc_eeprom_handle_reload();
 
-    printf("ESC: phy_config...\n"); fflush(stdout);
+    LOG_DEBUG("ESC", "phy_config...");
     ecat_phy_config(HPM_ESC);
 
-    printf("ESC: done\n"); fflush(stdout);
+    LOG_INFO("ESC", "init complete");
 }

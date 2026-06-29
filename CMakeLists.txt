@@ -3,6 +3,10 @@
 
 cmake_minimum_required(VERSION 3.13)
 
+# Suppress the HPM banner — must be set BEFORE find_package so it
+# applies to the SDK static library (board.c) too.
+set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -DBOARD_SHOW_BANNER=0")
+
 find_package(hpm-sdk REQUIRED HINTS $ENV{HPM_SDK_BASE})
 
 project(foe_slave)
@@ -32,6 +36,19 @@ sdk_app_src(src/esc_soes/main.c)
 sdk_app_src(src/esc_soes/objectlist.c)
 sdk_app_src(src/esc_soes/bootstrap.c)
 sdk_app_src(src/esc_soes/esc_init.c)
+
+# Logger middleware
+sdk_app_src(src/middleware/logger.c)
+
+# Default log level: INFO for debug builds, ERROR for release.
+if(NOT DEFINED LOG_LEVEL)
+    if(CMAKE_BUILD_TYPE STREQUAL "Release")
+        set(LOG_LEVEL 1)
+    else()
+        set(LOG_LEVEL 3)
+    endif()
+endif()
+add_compile_definitions(LOG_LEVEL=${LOG_LEVEL})
 
 # BOOT mailbox config is now set in ecat_options.h (MBXSIZEBOOT=0x1000, 4096 bytes)
 
